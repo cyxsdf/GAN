@@ -8,7 +8,9 @@ from transformers import BertTokenizer, BertModel
 
 class TRANSLATEModel(nn.Module):
     def __init__(self, hyp_params, missing=None):
-        """原始Translate模型（保持不变）"""
+        """
+        Construct a Translate model.
+        """
         super(TRANSLATEModel, self).__init__()
         if hyp_params.dataset == 'meld_senti' or hyp_params.dataset == 'meld_emo':
             self.l_len, self.a_len = hyp_params.l_len, hyp_params.a_len
@@ -25,8 +27,8 @@ class TRANSLATEModel(nn.Module):
         self.res_dropout = hyp_params.res_dropout
         self.embed_dropout = hyp_params.embed_dropout
         self.trans_dropout = hyp_params.trans_dropout
-        self.modalities = hyp_params.modalities  # 输入模态
-        self.missing = missing  # 缺失模态
+        self.modalities = hyp_params.modalities  # the input modality
+        self.missing = missing  # mark the missing modality
 
         self.position_embeddings = nn.Embedding(max(self.l_len, self.a_len, self.v_len), self.embed_dim)
         self.modal_type_embeddings = nn.Embedding(4, self.embed_dim)
@@ -34,7 +36,7 @@ class TRANSLATEModel(nn.Module):
         self.multi = nn.Parameter(torch.Tensor(1, self.embed_dim))
         nn.init.xavier_uniform_(self.multi)
 
-        # 转换模块
+        # translate module
         self.translator = TransformerEncoder(embed_dim=self.embed_dim,
                                              num_heads=self.num_heads,
                                              lens=(self.l_len, self.a_len, self.v_len),
@@ -45,7 +47,7 @@ class TRANSLATEModel(nn.Module):
                                              relu_dropout=self.relu_dropout,
                                              res_dropout=self.res_dropout)
 
-        # 投影模块
+        # project module  # just use fc to replace conv1d :-)
         if 'L' in self.modalities or self.missing == 'L':
             self.proj_l = nn.Linear(self.orig_d_l, self.embed_dim)
         if 'A' in self.modalities or self.missing == 'A':
@@ -63,7 +65,9 @@ class TRANSLATEModel(nn.Module):
             raise ValueError('Unknown missing modality type')
 
     def forward(self, src, tgt, phase='train', eval_start=False):
-        """原始前向传播逻辑（保持不变）"""
+        """
+        src and tgt should have dimension [batch_size, seq_len, n_features]
+        """
         if self.modalities == 'L':
             if self.missing == 'A':
                 x_l, x_a = src, tgt
@@ -135,13 +139,14 @@ class TRANSLATEModel(nn.Module):
             x_l = x_l.transpose(0, 1)
         else:
             raise ValueError('Unknown modalities type')
-
-        # 模态类型嵌入
+        #################################################################################
+        # For modal type embedding
         L_MODAL_TYPE_IDX = 0
         A_MODAL_TYPE_IDX = 1
         V_MODAL_TYPE_IDX = 2
 
-        # 准备[Uni]或[Bi] token
+        # Prepare the [Uni] token or [Bi] token
+        # NOTE: [Uni] or [Bi] is in front of the missing modality
         batch_size = tgt.shape[0]
         multi = self.multi.unsqueeze(1).repeat(1, batch_size, 1)
 
@@ -150,14 +155,14 @@ class TRANSLATEModel(nn.Module):
                 x_l = torch.cat((multi, x_l[:-1]), dim=0)
             elif self.missing == 'A':
                 x_a = torch.cat((multi, x_a[:-1]), dim=0)
-            elif self.missing == 'V':
+            elif self.missing == 'V':  # self.missing == 'V'
                 x_v = torch.cat((multi, x_v[:-1]), dim=0)
             else:
                 raise ValueError('Unknown missing modality type')
         else:
             if eval_start:
                 if self.missing == 'L':
-                    x_l = multi  # 使用[Uni]作为生成起始
+                    x_l = multi  # use [Uni] or [Bi] token as start to generate missing modality
                 elif self.missing == 'A':
                     x_a = multi
                 elif self.missing == 'V':
@@ -174,7 +179,7 @@ class TRANSLATEModel(nn.Module):
                 else:
                     raise ValueError('Unknown missing modality type')
 
-        # 位置嵌入和模态类型嵌入
+        # Prepare the positional embeddings & modal-type embeddings
         if 'L' in self.modalities or self.missing == 'L':
             x_l_pos_ids = torch.arange(x_l.shape[0], device=tgt.device).unsqueeze(1).expand(-1, batch_size)
             l_pos_embeds = self.position_embeddings(x_l_pos_ids)
@@ -196,8 +201,8 @@ class TRANSLATEModel(nn.Module):
             v_embeds = v_pos_embeds + v_modal_type_embeds
             x_v = x_v + v_embeds
             x_v = F.dropout(x_v, p=self.embed_dropout, training=self.training)
-
-        # 拼接输入并进行转换
+        #################################################################################
+        # Translation
         if self.modalities == 'L':
             if self.missing == 'A':
                 x = torch.cat((x_l, x_a), dim=0)
@@ -230,7 +235,6 @@ class TRANSLATEModel(nn.Module):
 
         output = self.translator(x)
 
-        # 提取输出
         if self.modalities == 'L':
             output = output[self.l_len:].transpose(0, 1)  # (batch, seq, embed_dim)
         elif self.modalities == 'A':
@@ -252,7 +256,9 @@ class TRANSLATEModel(nn.Module):
 
 class UNIMFModel(nn.Module):
     def __init__(self, hyp_params):
-        """原始UniMF模型（保持不变）"""
+        """
+        Construct a UniMF model.
+        """
         super(UNIMFModel, self).__init__()
         if hyp_params.dataset == 'meld_senti' or hyp_params.dataset == 'meld_emo':
             self.orig_l_len, self.orig_a_len = hyp_params.l_len, hyp_params.a_len
@@ -286,19 +292,19 @@ class UNIMFModel(nn.Module):
         self.cls = nn.Parameter(torch.Tensor(self.cls_len, self.embed_dim))
         nn.init.xavier_uniform_(self.cls)
 
-        # 计算卷积后的序列长度
+        # Calculate the sequence length after conv1d
         self.l_len = self.orig_l_len - self.l_kernel_size + 1
         self.a_len = self.orig_a_len - self.a_kernel_size + 1
         if self.dataset != 'meld_senti' and self.dataset != 'meld_emo':
             self.v_len = self.orig_v_len - self.v_kernel_size + 1
 
-        output_dim = hyp_params.output_dim
+        output_dim = hyp_params.output_dim  # This is actually not a hyperparameter :-)
 
-        # BERT模型
+        # Prepare BERT model if use bert
         if self.use_bert:
             self.text_model = BertTextEncoder(language=hyp_params.language, use_finetune=True)
 
-        # 1. 时间卷积块
+        # 1. Temporal convolutional blocks
         self.proj_l = nn.Conv1d(self.orig_d_l, self.embed_dim, kernel_size=self.l_kernel_size)
         self.proj_a = nn.Conv1d(self.orig_d_a, self.embed_dim, kernel_size=self.a_kernel_size)
         if self.dataset != 'meld_senti' and self.dataset != 'meld_emo':
@@ -306,13 +312,14 @@ class UNIMFModel(nn.Module):
         if 'meld' in self.dataset:
             self.proj_cls = nn.Conv1d(self.orig_d_l + self.orig_d_a, self.embed_dim, kernel_size=1)
 
-        # 2. GRU编码器
+        # 2. GRU encoder
         self.t = nn.GRU(input_size=self.embed_dim, hidden_size=self.embed_dim)
         self.a = nn.GRU(input_size=self.embed_dim, hidden_size=self.embed_dim)
         if self.dataset != 'meld_senti' and self.dataset != 'meld_emo':
             self.v = nn.GRU(input_size=self.embed_dim, hidden_size=self.embed_dim)
 
-        # 3. 多模态融合块
+        # 3. Multimodal fusion block
+        # 3.1. Position embeddings & Modal type embeddings
         if self.dataset == 'meld_senti' or self.dataset == 'meld_emo':
             self.position_embeddings = nn.Embedding(max(self.cls_len, self.l_len, self.a_len), self.embed_dim)
         else:
@@ -329,34 +336,37 @@ class UNIMFModel(nn.Module):
                                                   relu_dropout=self.relu_dropout,
                                                   res_dropout=self.res_dropout)
 
-        # 4. 投影层
+        # 4. Projection layers
         combined_dim = self.embed_dim
         self.proj1 = nn.Linear(combined_dim, combined_dim)
         self.proj2 = nn.Linear(combined_dim, combined_dim)
         self.out_layer = nn.Linear(combined_dim, output_dim)
 
     def forward(self, x_l, x_a, x_v=None):
-        """原始前向传播逻辑（保持不变）"""
+        """
+        text, audio, and vision should have dimension [batch_size, seq_len, n_features]
+        """
         if self.distribute:
             self.t.flatten_parameters()
             self.a.flatten_parameters()
             if x_v is not None:
                 self.v.flatten_parameters()
-
-        # 模态类型嵌入
+        #################################################################################
+        # For modal type embedding
         L_MODAL_TYPE_IDX = 0
         A_MODAL_TYPE_IDX = 1
         V_MODAL_TYPE_IDX = 2
         MULTI_MODAL_TYPE_IDX = 3
 
-        # 准备[CLS] token
+        # Prepare the [CLS] token
         batch_size = x_l.shape[0]
         if self.dataset != 'meld_senti' and self.dataset != 'meld_emo':
             cls = self.cls.unsqueeze(1).repeat(1, batch_size, 1)
         else:
             cls = self.proj_cls(torch.cat((x_l, x_a), dim=-1).transpose(1, 2)).permute(2, 0, 1)
 
-        # 位置嵌入和模态类型嵌入
+        # Prepare the positional embeddings & modal-type embeddings
+        # NOTE: [CLS] is at the ZERO index
         cls_pos_ids = torch.arange(self.cls_len, device=x_l.device).unsqueeze(1).expand(-1, batch_size)
         h_l_pos_ids = torch.arange(self.l_len, device=x_l.device).unsqueeze(1).expand(-1, batch_size)
         h_a_pos_ids = torch.arange(self.a_len, device=x_a.device).unsqueeze(1).expand(-1, batch_size)
@@ -374,8 +384,8 @@ class UNIMFModel(nn.Module):
         a_modal_type_embeds = self.modal_type_embeddings(torch.full_like(h_a_pos_ids, A_MODAL_TYPE_IDX))
         if x_v is not None:
             v_modal_type_embeds = self.modal_type_embeddings(torch.full_like(h_v_pos_ids, V_MODAL_TYPE_IDX))
-
-        # 投影文本/视觉/音频特征并压缩序列长度
+        #################################################################################
+        # Project the textual/visual/audio features & Compress the sequence length
         if self.use_bert:
             x_l = self.text_model(x_l)
 
@@ -392,14 +402,14 @@ class UNIMFModel(nn.Module):
         proj_x_a = proj_x_a.permute(2, 0, 1)
         if x_v is not None:
             proj_x_v = proj_x_v.permute(2, 0, 1)
-
-        # 使用GRU编码
+        #################################################################################
+        # Use GRU to encode
         h_l, _ = self.t(proj_x_l)
         h_a, _ = self.a(proj_x_a)
         if x_v is not None:
             h_v, _ = self.v(proj_x_v)
-
-        # 添加位置和模态类型嵌入
+        #################################################################################
+        # Add positional & modal-type embeddings
         cls_embeds = cls_pos_embeds + cls_modal_type_embeds
         l_embeds = h_l_pos_embeds + l_modal_type_embeds
         a_embeds = h_a_pos_embeds + a_modal_type_embeds
@@ -414,8 +424,9 @@ class UNIMFModel(nn.Module):
         h_a = F.dropout(h_a, p=self.embed_dropout, training=self.training)
         if x_v is not None:
             h_v = F.dropout(h_v, p=self.embed_dropout, training=self.training)
-
-        # 多模态融合
+        #################################################################################
+        # Multimodal fusion
+        # Get total sequence and feed into UniMF
         if x_v is not None:
             x = torch.cat((cls, h_l, h_a, h_v), dim=0)
         else:
@@ -423,9 +434,10 @@ class UNIMFModel(nn.Module):
         x = self.unimf(x)
 
         if x_v is not None:
-            last_hs = x[0]  # 获取[CLS] token用于预测
+            # A residual block
+            last_hs = x[0]  # get [CLS] token for prediction
         else:
-            last_hs = x[:self.cls_len]  # 获取[CLS] tokens用于预测
+            last_hs = x[:self.cls_len]  # get [CLS] tokens for prediction
 
         last_hs_proj = self.proj2(
             F.dropout(F.relu(self.proj1(last_hs)), p=self.out_dropout, training=self.training))
@@ -439,7 +451,9 @@ class UNIMFModel(nn.Module):
 
 class BertTextEncoder(nn.Module):
     def __init__(self, language='en', use_finetune=False):
-        """BERT文本编码器（保持不变）"""
+        """
+        language: en / cn
+        """
         super(BertTextEncoder, self).__init__()
 
         assert language in ['en', 'cn']
@@ -459,20 +473,30 @@ class BertTextEncoder(nn.Module):
         return self.tokenizer
 
     def from_text(self, text):
+        """
+        text: raw data
+        """
         input_ids = self.get_id(text)
         with torch.no_grad():
-            last_hidden_states = self.model(input_ids)[0]
+            last_hidden_states = self.model(input_ids)[0]  # Models outputs are now tuples
         return last_hidden_states.squeeze()
 
     def forward(self, text):
+        """
+        text: (batch_size, 3, seq_len)
+        3: input_ids, input_mask, segment_ids
+        input_ids: input_ids,
+        input_mask: attention_mask,
+        segment_ids: token_type_ids
+        """
         input_ids, input_mask, segment_ids = text[:, 0, :].long(), text[:, 1, :].float(), text[:, 2, :].long()
         if self.use_finetune:
             last_hidden_states = self.model(input_ids=input_ids,
                                             attention_mask=input_mask,
-                                            token_type_ids=segment_ids)[0]
+                                            token_type_ids=segment_ids)[0]  # Models outputs are now tuples
         else:
             with torch.no_grad():
                 last_hidden_states = self.model(input_ids=input_ids,
                                                 attention_mask=input_mask,
-                                                token_type_ids=segment_ids)[0]
+                                                token_type_ids=segment_ids)[0]  # Models outputs are now tuples
         return last_hidden_states
